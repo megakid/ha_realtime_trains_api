@@ -175,7 +175,7 @@ class RealtimeTrainLiveTrainTimeSensor(RealtimeTrainSensor):
 
                 if self._next_trains:
                     self._state = min(
-                        _delta_mins(train["scheduled"]) for train in self._next_trains
+                        _delta_mins_vs_now(train["scheduled"]) for train in self._next_trains
                     )
                 else:
                     self._state = None
@@ -186,13 +186,20 @@ class RealtimeTrainLiveTrainTimeSensor(RealtimeTrainSensor):
         response = requests.get(trainUrl, auth=(self._username, self._password))
         if response.status_code == HTTPStatus.OK:
             data = response.json()
-            calling_at_data = [s for s in data['locations'] if s['crs'] == self._calling_at]
-            if len(calling_at_data) > 0:
-                scheduled_arrival = calling_at_data[0]['gbttBookedArrival']
-                estimated_arrival = calling_at_data[0]['realtimeArrival']
-                train["scheduled_arrival"] = _to_colonseparatedtime(scheduled_arrival)
-                train["estimated_arrival"] = _to_colonseparatedtime(estimated_arrival)
-            else:
+            stopCount = -1 # origin counts as a stop in the returned json
+            found = False
+            for stop in data['locations']:
+                if stop['crs'] == self._calling_at:
+                    scheduled_arrival = stop['gbttBookedArrival']
+                    estimated_arrival = stop['realtimeArrival']
+                    train["scheduled_arrival"] = _to_colonseparatedtime(scheduled_arrival)
+                    train["estimated_arrival"] = _to_colonseparatedtime(estimated_arrival)
+                    train["journey_time_mins"] = _delta_mins(train["estimated_arrival"] , train["estimated"])
+                    train["stops"] = stopCount
+                    found = True
+                    break
+                stopCount += 1
+            if not found:
                 _LOGGER.warning(f"Could not find {self._calling_at} in stops for service {train['service_uid']}.")    
         else:
             _LOGGER.warning(f"Could not populate arrival times: Invalid response from API (HTTP code {response.status_code})")
@@ -211,11 +218,25 @@ class RealtimeTrainLiveTrainTimeSensor(RealtimeTrainSensor):
 def _to_colonseparatedtime(hhmm_time_str):
     return hhmm_time_str[:2] + ":" + hhmm_time_str[2:]
 
-def _delta_mins(hhmm_time_str):
+def _delta_mins(hhmm_time_str_a, hhmm_time_str_b):
+    """Calculate time delta in minutes to a time in hh:mm format."""
+    now = dt_util.now()
+    hhmm_time_a = datetime.strptime(hhmm_time_str_a, "%H:%M")
+    hhmm_datetime_a = now.replace(hour=hhmm_time_a.hour, minute=hhmm_time_a.minute)
+    hhmm_time_b = datetime.strptime(hhmm_time_str_b, "%H:%M")
+    hhmm_datetime_b = now.replace(hour=hhmm_time_b.hour, minute=hhmm_time_b.minute)
+    
+    if hhmm_datetime_a < hhmm_datetime_b:
+        hhmm_datetime_a += timedelta(days=1)
+
+    delta_mins = (hhmm_datetime_a - hhmm_datetime_b).total_seconds() // 60
+    return delta_mins
+
+def _delta_mins_vs_now(hhmm_time_str):
     """Calculate time delta in minutes to a time in hh:mm format."""
     now = dt_util.now()
     hhmm_time = datetime.strptime(hhmm_time_str, "%H:%M")
-
+    
     hhmm_datetime = now.replace(hour=hhmm_time.hour, minute=hhmm_time.minute)
 
     if hhmm_datetime < now:
