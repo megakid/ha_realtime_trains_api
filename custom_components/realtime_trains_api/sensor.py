@@ -189,7 +189,7 @@ class RealtimeTrainLiveTrainTimeSensor(RealtimeTrainSensor):
 def _delta_mins(hhmm_time_str):
     """Calculate time delta in minutes to a time in hh:mm format."""
     now = dt_util.now()
-    hhmm_time = datetime.strptime(hhmm_time_str, "%H:%M")
+    hhmm_time = datetime.strptime(hhmm_time_str, "%H%M")
 
     hhmm_datetime = now.replace(hour=hhmm_time.hour, minute=hhmm_time.minute)
 

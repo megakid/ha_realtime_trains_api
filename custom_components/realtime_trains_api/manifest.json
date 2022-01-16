@@ -4,5 +4,5 @@
     "documentation": "https://github.com/megakid/ha_realtime_trains_api",
     "codeowners": [],
     "iot_class": "cloud_polling",
-    "version": "1.0.1"
+    "version": "1.0.2"
   }
