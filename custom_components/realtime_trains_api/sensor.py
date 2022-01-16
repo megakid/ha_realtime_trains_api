@@ -57,11 +57,11 @@ def setup_platform(
 ) -> None:
     """Get the realtime_train sensor."""
     sensors: list[RealtimeTrainSensor] = []
-    queries: config[CONF_QUERIES]
     interval = timedelta(seconds=120)
 
     username = config[CONF_API_USERNAME]
     password = config[CONF_API_PASSWORD]
+    queries = config[CONF_QUERIES]
 
     for query in queries:
         station_code = query.get(CONF_ORIGIN)
