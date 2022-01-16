@@ -32,11 +32,13 @@ CONF_API_PASSWORD = "password"
 CONF_QUERIES = "queries"
 CONF_ORIGIN = "origin"
 CONF_DESTINATION = "destination"
+CONF_ARRIVALTIMES = "arrival_times_for_next_X_trains"
 
 _QUERY_SCHEME = vol.Schema(
     {
         vol.Required(CONF_ORIGIN): cv.string,
         vol.Required(CONF_DESTINATION): cv.string,
+        vol.Optional(CONF_ARRIVALTIMES, default=0): cv.positive_int,
     }
 )
 
@@ -66,12 +68,14 @@ def setup_platform(
     for query in queries:
         station_code = query.get(CONF_ORIGIN)
         calling_at = query.get(CONF_DESTINATION)
+        arrival_times_for_next_X_trains = query.get(CONF_ARRIVALTIMES)
         sensors.append(
             RealtimeTrainLiveTrainTimeSensor(
                 username,
                 password,
                 station_code,
                 calling_at,
+                arrival_times_for_next_X_trains,
                 interval,
             )
         )
@@ -111,7 +115,7 @@ class RealtimeTrainSensor(SensorEntity):
         """Return the state of the sensor."""
         return self._state
 
-    def _do_api_request(self, params):
+    def _do_api_request(self):
         """Perform an API request."""
         response = requests.get(self._url, auth=(self._username, self._password))
         if response.status_code == HTTPStatus.OK:
@@ -126,10 +130,12 @@ class RealtimeTrainLiveTrainTimeSensor(RealtimeTrainSensor):
 
     _attr_icon = "mdi:train"
 
-    def __init__(self, username, password, station_code, calling_at, interval):
+    def __init__(self, username, password, station_code, calling_at,
+                arrival_times_for_next_X_trains, interval):
         """Construct a live train time sensor."""
         self._station_code = station_code
         self._calling_at = calling_at
+        self._arrival_times_for_next_X_trains = arrival_times_for_next_X_trains
         self._next_trains = []
 
         sensor_name = f"Next train from {station_code} to {calling_at}"
@@ -142,30 +148,30 @@ class RealtimeTrainLiveTrainTimeSensor(RealtimeTrainSensor):
 
     def _update(self):
         """Get the latest live departure data for the specified stop."""
-        params = {
-        }
-
-        self._do_api_request(params)
+        self._do_api_request()
         self._next_trains = []
 
+        trainCount = 0
         if self._data != {}:
             if self._data["services"] == None:
                 self._state = "No departures"
             else:
                 for departure in self._data["services"]:
-                    if departure["isPassenger"] == True:
-                        self._next_trains.append(
-                            {
+                    if departure["isPassenger"]:
+                        trainCount += 1
+                        train = {
                                 "origin_name": departure["locationDetail"]["origin"][0]["description"],
                                 "destination_name": departure["locationDetail"]["destination"][0]["description"],
                                 "service_date": departure["runDate"],
                                 "service_uid": departure["serviceUid"],
-                                "scheduled": departure["locationDetail"]["gbttBookedDeparture"],
-                                "estimated": departure["locationDetail"]["realtimeDeparture"],
+                                "scheduled": _to_colonseparatedtime(departure["locationDetail"]["gbttBookedDeparture"]),
+                                "estimated": _to_colonseparatedtime(departure["locationDetail"]["realtimeDeparture"]),
                                 "platform": departure["locationDetail"]["platform"],
                                 "operator_name": departure["atocName"],
                             }
-                        )
+                        if trainCount <= self._arrival_times_for_next_X_trains:
+                            self._add_arrival_time(train)
+                        self._next_trains.append(train)
 
                 if self._next_trains:
                     self._state = min(
@@ -173,6 +179,23 @@ class RealtimeTrainLiveTrainTimeSensor(RealtimeTrainSensor):
                     )
                 else:
                     self._state = None
+
+    def _add_arrival_time(self, train):
+        """Perform an API request."""
+        trainUrl = self.TRANSPORT_API_URL_BASE + f"service/{train['service_uid']}/{train['service_date'].replace('-', '/')}"
+        response = requests.get(trainUrl, auth=(self._username, self._password))
+        if response.status_code == HTTPStatus.OK:
+            data = response.json()
+            calling_at_data = [s for s in data['locations'] if s['crs'] == self._calling_at]
+            if len(calling_at_data) > 0:
+                scheduled_arrival = calling_at_data[0]['gbttBookedArrival']
+                estimated_arrival = calling_at_data[0]['realtimeArrival']
+                train["scheduled_arrival"] = _to_colonseparatedtime(scheduled_arrival)
+                train["estimated_arrival"] = _to_colonseparatedtime(estimated_arrival)
+            else:
+                _LOGGER.warning(f"Could not find {self._calling_at} in stops for service {train['service_uid']}.")    
+        else:
+            _LOGGER.warning(f"Could not populate arrival times: Invalid response from API (HTTP code {response.status_code})")
 
     @property
     def extra_state_attributes(self):
@@ -185,11 +208,13 @@ class RealtimeTrainLiveTrainTimeSensor(RealtimeTrainSensor):
                 attrs[ATTR_NEXT_TRAINS] = self._next_trains
             return attrs
 
+def _to_colonseparatedtime(hhmm_time_str):
+    return hhmm_time_str[:2] + ":" + hhmm_time_str[2:]
 
 def _delta_mins(hhmm_time_str):
     """Calculate time delta in minutes to a time in hh:mm format."""
     now = dt_util.now()
-    hhmm_time = datetime.strptime(hhmm_time_str, "%H%M")
+    hhmm_time = datetime.strptime(hhmm_time_str, "%H:%M")
 
     hhmm_datetime = now.replace(hour=hhmm_time.hour, minute=hhmm_time.minute)
 
