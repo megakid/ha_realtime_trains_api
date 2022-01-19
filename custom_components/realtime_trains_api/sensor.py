@@ -1,17 +1,19 @@
 """Support for UK train data provided by api.rtt.io."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from http import HTTPStatus
+from datetime import date, datetime, timedelta
 import logging
-import re
+import aiohttp
+import json
+import pytz
 
-import requests
 import voluptuous as vol
+from typing import cast
 
 from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
-from homeassistant.const import TIME_MINUTES
+from homeassistant.const import TIME_MINUTES, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
@@ -19,6 +21,8 @@ from homeassistant.util import Throttle
 import homeassistant.util.dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
+
+DEFAULT_TIMEOFFSET = timedelta(minutes=0)
 
 ATTR_ATCOCODE = "atcocode"
 ATTR_LOCALITY = "locality"
@@ -30,20 +34,31 @@ ATTR_NEXT_TRAINS = "next_trains"
 CONF_API_USERNAME = "username"
 CONF_API_PASSWORD = "password"
 CONF_QUERIES = "queries"
+CONF_AUTOADJUSTSCANS = "auto_adjust_scans"
+
 CONF_ORIGIN = "origin"
 CONF_DESTINATION = "destination"
-CONF_ARRIVALTIMES = "arrival_times_for_next_X_trains"
+CONF_JOURNEYDATA = "journey_data_for_next_X_trains"
+CONF_SENSORNAME = "sensor_name"
+CONF_TIMEOFFSET = "time_offset"
 
+TIMEZONE = pytz.timezone('Europe/London')
+STRFFORMAT = "%d-%m-%Y %H:%M"
 _QUERY_SCHEME = vol.Schema(
     {
+        vol.Optional(CONF_SENSORNAME): cv.string,
         vol.Required(CONF_ORIGIN): cv.string,
         vol.Required(CONF_DESTINATION): cv.string,
-        vol.Optional(CONF_ARRIVALTIMES, default=0): cv.positive_int,
+        vol.Optional(CONF_JOURNEYDATA, default=0): cv.positive_int,
+        vol.Optional(CONF_TIMEOFFSET, default=DEFAULT_TIMEOFFSET): vol.All(
+                    cv.time_period, cv.positive_timedelta
+                )
     }
 )
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
+        vol.Optional(CONF_AUTOADJUSTSCANS, default=False): cv.boolean,
         vol.Required(CONF_API_USERNAME): cv.string,
         vol.Required(CONF_API_PASSWORD): cv.string,
         vol.Required(CONF_QUERIES): [_QUERY_SCHEME],
@@ -51,39 +66,47 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 
-def setup_platform(
+async def async_setup_platform(
     hass: HomeAssistant,
     config: ConfigType,
-    add_entities: AddEntitiesCallback,
+    async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Get the realtime_train sensor."""
-    sensors: list[RealtimeTrainSensor] = []
-    interval = timedelta(seconds=120)
-
+    sensors = { }
+    interval = config[CONF_SCAN_INTERVAL]
+    autoadjustscans = config[CONF_AUTOADJUSTSCANS]
     username = config[CONF_API_USERNAME]
     password = config[CONF_API_PASSWORD]
     queries = config[CONF_QUERIES]
+    
+
+    client = async_get_clientsession(hass)
 
     for query in queries:
+        sensor_name = query.get(CONF_SENSORNAME, None)
         station_code = query.get(CONF_ORIGIN)
         calling_at = query.get(CONF_DESTINATION)
-        arrival_times_for_next_X_trains = query.get(CONF_ARRIVALTIMES)
-        sensors.append(
-            RealtimeTrainLiveTrainTimeSensor(
+        journey_data_for_next_X_trains = query.get(CONF_JOURNEYDATA)
+        timeoffset = query.get(CONF_TIMEOFFSET)
+        sensor = RealtimeTrainLiveTrainTimeSensor(
+                sensor_name,
                 username,
                 password,
                 station_code,
                 calling_at,
-                arrival_times_for_next_X_trains,
+                journey_data_for_next_X_trains,
+                timeoffset,
+                autoadjustscans,
                 interval,
+                client
             )
-        )
+        sensors[sensor.name] = sensor
 
-    add_entities(sensors, True)
+    async_add_entities(sensors.values(), True)
 
 
-class RealtimeTrainSensor(SensorEntity):
+class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
     """
     Sensor that reads the rtt API.
 
@@ -92,18 +115,96 @@ class RealtimeTrainSensor(SensorEntity):
     base class can be used to access specific types of information.
     """
 
+
+
     TRANSPORT_API_URL_BASE = "https://api.rtt.io/api/v1/json/"
     _attr_icon = "mdi:train"
     _attr_native_unit_of_measurement = TIME_MINUTES
 
-    def __init__(self, name, username, password, url):
-        """Initialize the sensor."""
+    def __init__(self, sensor_name, username, password, station_code, calling_at,
+                journey_data_for_next_X_trains, timeoffset, autoadjustscans, interval, client):
+        """Construct a live train time sensor."""
+
+        default_sensor_name = (
+            f"Next train from {station_code} to {calling_at} ({timeoffset})" if (timeoffset.total_seconds() > 0) 
+            else f"Next train from {station_code} to {calling_at}")
+
+        self._station_code = station_code
+        self._calling_at = calling_at
+        self._journey_data_for_next_X_trains = journey_data_for_next_X_trains
+        self._next_trains = []
         self._data = {}
         self._username = username
         self._password = password
-        self._url = self.TRANSPORT_API_URL_BASE + url
-        self._name = name
+        self._timeoffset = timeoffset
+        self._autoadjustscans = autoadjustscans
+        self._interval = interval
+        self._client = client
+
+        self._name = default_sensor_name if sensor_name is None else sensor_name
         self._state = None
+
+        self.async_update = self._async_update
+
+    async def _async_update(self):
+        """Get the latest live departure data for the specified stop."""
+        await self._getdepartures_api_request()
+        self._next_trains = []
+        departureCount = 0
+        now = cast(datetime, dt_util.now()).astimezone(TIMEZONE)
+
+        nextDepartureEstimatedTs : (datetime | None) = None
+
+        departures = [] if self._data == {} or self._data["services"] == None else self._data["services"]
+
+        for departure in departures:
+            if not departure["isPassenger"] :
+                continue
+            
+            departuredate = TIMEZONE.localize(datetime.fromisoformat(departure["runDate"]))
+            
+            scheduled = _to_colonseparatedtime(departure["locationDetail"]["gbttBookedDeparture"])
+            scheduledTs = _timestamp(scheduled, departuredate)
+            
+            if _delta_secs(scheduledTs, now) < self._timeoffset.total_seconds():
+                continue
+            
+            estimated = _to_colonseparatedtime(departure["locationDetail"]["realtimeDeparture"])
+            estimatedTs = _timestamp(estimated, departuredate)
+            
+            if nextDepartureEstimatedTs is None:
+                nextDepartureEstimatedTs = estimatedTs
+            else:
+                nextDepartureEstimatedTs = min(nextDepartureEstimatedTs, estimatedTs)
+
+            departureCount += 1
+            
+            train = {
+                    "origin_name": departure["locationDetail"]["origin"][0]["description"],
+                    "destination_name": departure["locationDetail"]["destination"][0]["description"],
+                    #"service_date": departure["runDate"],
+                    "service_uid": departure["serviceUid"],
+                    "scheduled": scheduledTs.strftime(STRFFORMAT),
+                    "estimated": estimatedTs.strftime(STRFFORMAT),
+                    "minutes": _delta_secs(estimatedTs, now) // 60,
+                    "platform": departure["locationDetail"].get("platform", None),
+                    "operator_name": departure["atocName"],
+                }
+            if departureCount <= self._journey_data_for_next_X_trains:
+                await self._add_journey_data(train, scheduledTs, estimatedTs)
+            self._next_trains.append(train)
+
+        if nextDepartureEstimatedTs is None:
+            self._state = "No Departures"
+        else:
+            self._state = _delta_secs(nextDepartureEstimatedTs, now) // 60
+        
+        if self._autoadjustscans:
+            if nextDepartureEstimatedTs is None:
+                self.async_update = Throttle(timedelta(minutes=30))(self._async_update)
+            else:
+                self.async_update = self._async_update
+
 
     @property
     def name(self):
@@ -115,94 +216,43 @@ class RealtimeTrainSensor(SensorEntity):
         """Return the state of the sensor."""
         return self._state
 
-    def _do_api_request(self):
+    async def _getdepartures_api_request(self):
         """Perform an API request."""
-        response = requests.get(self._url, auth=(self._username, self._password))
-        if response.status_code == HTTPStatus.OK:
-            self._data = response.json()
-        elif response.status_code == HTTPStatus.FORBIDDEN:
-            self._state = "Credentials invalid"
-        else:
-            _LOGGER.warning("Invalid response from API")
-
-class RealtimeTrainLiveTrainTimeSensor(RealtimeTrainSensor):
-    """Live train time sensor from api.rtt.io."""
-
-    _attr_icon = "mdi:train"
-
-    def __init__(self, username, password, station_code, calling_at,
-                arrival_times_for_next_X_trains, interval):
-        """Construct a live train time sensor."""
-        self._station_code = station_code
-        self._calling_at = calling_at
-        self._arrival_times_for_next_X_trains = arrival_times_for_next_X_trains
-        self._next_trains = []
-
-        sensor_name = f"Next train from {station_code} to {calling_at}"
-        query_url = f"search/{station_code}/to/{calling_at}"
-
-        RealtimeTrainSensor.__init__(
-            self, sensor_name, username, password, query_url
-        )
-        self.update = Throttle(interval)(self._update)
-
-    def _update(self):
-        """Get the latest live departure data for the specified stop."""
-        self._do_api_request()
-        self._next_trains = []
-
-        trainCount = 0
-        if self._data != {}:
-            if self._data["services"] == None:
-                self._state = "No departures"
+        depsUrl = self.TRANSPORT_API_URL_BASE + f"search/{self._station_code}/to/{self._calling_at}"
+        async with self._client.get(depsUrl, auth=aiohttp.BasicAuth(login=self._username, password=self._password, encoding='utf-8')) as response:
+            if response.status == 200:
+                self._data = await response.json()
+            elif response.status == 403:
+                self._state = "Credentials invalid"
             else:
-                for departure in self._data["services"]:
-                    if departure["isPassenger"]:
-                        trainCount += 1
-                        train = {
-                                "origin_name": departure["locationDetail"]["origin"][0]["description"],
-                                "destination_name": departure["locationDetail"]["destination"][0]["description"],
-                                "service_date": departure["runDate"],
-                                "service_uid": departure["serviceUid"],
-                                "scheduled": _to_colonseparatedtime(departure["locationDetail"]["gbttBookedDeparture"]),
-                                "estimated": _to_colonseparatedtime(departure["locationDetail"]["realtimeDeparture"]),
-                                "platform": departure["locationDetail"]["platform"],
-                                "operator_name": departure["atocName"],
-                            }
-                        if trainCount <= self._arrival_times_for_next_X_trains:
-                            self._add_arrival_time(train)
-                        self._next_trains.append(train)
+                _LOGGER.warning("Invalid response from API")
 
-                if self._next_trains:
-                    self._state = min(
-                        _delta_mins_vs_now(train["scheduled"]) for train in self._next_trains
-                    )
-                else:
-                    self._state = None
-
-    def _add_arrival_time(self, train):
+    async def _add_journey_data(self, train, scheduled, estimated):
         """Perform an API request."""
-        trainUrl = self.TRANSPORT_API_URL_BASE + f"service/{train['service_uid']}/{train['service_date'].replace('-', '/')}"
-        response = requests.get(trainUrl, auth=(self._username, self._password))
-        if response.status_code == HTTPStatus.OK:
-            data = response.json()
-            stopCount = -1 # origin counts as a stop in the returned json
-            found = False
-            for stop in data['locations']:
-                if stop['crs'] == self._calling_at:
-                    scheduled_arrival = stop['gbttBookedArrival']
-                    estimated_arrival = stop['realtimeArrival']
-                    train["scheduled_arrival"] = _to_colonseparatedtime(scheduled_arrival)
-                    train["estimated_arrival"] = _to_colonseparatedtime(estimated_arrival)
-                    train["journey_time_mins"] = _delta_mins(train["estimated_arrival"] , train["estimated"])
-                    train["stops"] = stopCount
-                    found = True
-                    break
-                stopCount += 1
-            if not found:
-                _LOGGER.warning(f"Could not find {self._calling_at} in stops for service {train['service_uid']}.")    
-        else:
-            _LOGGER.warning(f"Could not populate arrival times: Invalid response from API (HTTP code {response.status_code})")
+        trainUrl = self.TRANSPORT_API_URL_BASE + f"service/{train['service_uid']}/{scheduled.strftime('%Y/%m/%d')}"
+        async with self._client.get(trainUrl, auth=aiohttp.BasicAuth(login=self._username, password=self._password, encoding='utf-8')) as response:
+            if response.status == 200:
+                data = await response.json()
+                stopCount = -1 # origin counts as first stop in the returned json
+                found = False
+                for stop in data['locations']:
+                    if stop['crs'] == self._calling_at:
+                        scheduled_arrival = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled)
+                        estimated_arrival = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled)
+                        newtrain = {
+                            "scheduled_arrival": scheduled_arrival.strftime(STRFFORMAT),
+                            "estimate_arrival": estimated_arrival.strftime(STRFFORMAT),
+                            "journey_time_mins": _delta_secs(scheduled_arrival, estimated) // 60,
+                            "stops": stopCount
+                        }
+                        train.update(newtrain)
+                        found = True
+                        break
+                    stopCount += 1
+                if not found:
+                    _LOGGER.warning(f"Could not find {self._calling_at} in stops for service {train['service_uid']}.")    
+            else:
+                _LOGGER.warning(f"Could not populate arrival times: Invalid response from API (HTTP code {response.status})")
 
     @property
     def extra_state_attributes(self):
@@ -215,32 +265,18 @@ class RealtimeTrainLiveTrainTimeSensor(RealtimeTrainSensor):
                 attrs[ATTR_NEXT_TRAINS] = self._next_trains
             return attrs
 
-def _to_colonseparatedtime(hhmm_time_str):
+def _to_colonseparatedtime(hhmm_time_str : str) -> str:
     return hhmm_time_str[:2] + ":" + hhmm_time_str[2:]
 
-def _delta_mins(hhmm_time_str_a, hhmm_time_str_b):
-    """Calculate time delta in minutes to a time in hh:mm format."""
-    now = dt_util.now()
-    hhmm_time_a = datetime.strptime(hhmm_time_str_a, "%H:%M")
-    hhmm_datetime_a = now.replace(hour=hhmm_time_a.hour, minute=hhmm_time_a.minute)
-    hhmm_time_b = datetime.strptime(hhmm_time_str_b, "%H:%M")
-    hhmm_datetime_b = now.replace(hour=hhmm_time_b.hour, minute=hhmm_time_b.minute)
-    
-    if hhmm_datetime_a < hhmm_datetime_b:
-        hhmm_datetime_a += timedelta(days=1)
-
-    delta_mins = (hhmm_datetime_a - hhmm_datetime_b).total_seconds() // 60
-    return delta_mins
-
-def _delta_mins_vs_now(hhmm_time_str):
-    """Calculate time delta in minutes to a time in hh:mm format."""
-    now = dt_util.now()
-    hhmm_time = datetime.strptime(hhmm_time_str, "%H:%M")
-    
-    hhmm_datetime = now.replace(hour=hhmm_time.hour, minute=hhmm_time.minute)
-
+def _timestamp(hhmm_time_str : str, date : datetime=None) -> datetime:
+    now = cast(datetime, dt_util.now()).astimezone(TIMEZONE) if date is None else date
+    hhmm_time_a = datetime.strptime(hhmm_time_str, "%H:%M")
+    hhmm_datetime = now.replace(hour=hhmm_time_a.hour, minute=hhmm_time_a.minute, second=0, microsecond=0)
     if hhmm_datetime < now:
         hhmm_datetime += timedelta(days=1)
+    return hhmm_datetime
 
-    delta_mins = (hhmm_datetime - now).total_seconds() // 60
-    return delta_mins
+def _delta_secs(hhmm_datetime_a : datetime, hhmm_datetime_b : datetime) -> float:
+    """Calculate time delta in minutes to a time in hh:mm format."""
+    return (hhmm_datetime_a - hhmm_datetime_b).total_seconds()
+
