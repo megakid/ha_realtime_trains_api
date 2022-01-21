@@ -1,10 +1,9 @@
 """Support for UK train data provided by api.rtt.io."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 import logging
 import aiohttp
-import json
 import pytz
 
 import voluptuous as vol
@@ -27,8 +26,8 @@ DEFAULT_TIMEOFFSET = timedelta(minutes=0)
 ATTR_ATCOCODE = "atcocode"
 ATTR_LOCALITY = "locality"
 ATTR_REQUEST_TIME = "request_time"
-ATTR_STATION_CODE = "station_code"
-ATTR_CALLING_AT = "calling_at"
+ATTR_JOURNEY_START = "journey_start"
+ATTR_JOURNEY_END = "journey_end"
 ATTR_NEXT_TRAINS = "next_trains"
 
 CONF_API_USERNAME = "username"
@@ -36,23 +35,25 @@ CONF_API_PASSWORD = "password"
 CONF_QUERIES = "queries"
 CONF_AUTOADJUSTSCANS = "auto_adjust_scans"
 
-CONF_ORIGIN = "origin"
-CONF_DESTINATION = "destination"
+CONF_START = "origin"
+CONF_END = "destination"
 CONF_JOURNEYDATA = "journey_data_for_next_X_trains"
 CONF_SENSORNAME = "sensor_name"
 CONF_TIMEOFFSET = "time_offset"
+CONF_STOPS_OF_INTEREST = "stops_of_interest"
 
 TIMEZONE = pytz.timezone('Europe/London')
 STRFFORMAT = "%d-%m-%Y %H:%M"
+
 _QUERY_SCHEME = vol.Schema(
     {
         vol.Optional(CONF_SENSORNAME): cv.string,
-        vol.Required(CONF_ORIGIN): cv.string,
-        vol.Required(CONF_DESTINATION): cv.string,
+        vol.Required(CONF_START): cv.string,
+        vol.Required(CONF_END): cv.string,
         vol.Optional(CONF_JOURNEYDATA, default=0): cv.positive_int,
-        vol.Optional(CONF_TIMEOFFSET, default=DEFAULT_TIMEOFFSET): vol.All(
-                    cv.time_period, cv.positive_timedelta
-                )
+        vol.Optional(CONF_TIMEOFFSET, default=DEFAULT_TIMEOFFSET): 
+            vol.All(cv.time_period, cv.positive_timedelta),
+        vol.Optional(CONF_STOPS_OF_INTEREST): [cv.string],
     }
 )
 
@@ -85,19 +86,21 @@ async def async_setup_platform(
 
     for query in queries:
         sensor_name = query.get(CONF_SENSORNAME, None)
-        station_code = query.get(CONF_ORIGIN)
-        calling_at = query.get(CONF_DESTINATION)
+        journey_start = query.get(CONF_START)
+        journey_end = query.get(CONF_END)
         journey_data_for_next_X_trains = query.get(CONF_JOURNEYDATA)
         timeoffset = query.get(CONF_TIMEOFFSET)
+        stops_of_interest = query.get(CONF_STOPS_OF_INTEREST, [])
         sensor = RealtimeTrainLiveTrainTimeSensor(
                 sensor_name,
                 username,
                 password,
-                station_code,
-                calling_at,
+                journey_start,
+                journey_end,
                 journey_data_for_next_X_trains,
                 timeoffset,
                 autoadjustscans,
+                stops_of_interest,
                 interval,
                 client
             )
@@ -121,16 +124,16 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
     _attr_icon = "mdi:train"
     _attr_native_unit_of_measurement = TIME_MINUTES
 
-    def __init__(self, sensor_name, username, password, station_code, calling_at,
-                journey_data_for_next_X_trains, timeoffset, autoadjustscans, interval, client):
+    def __init__(self, sensor_name, username, password, journey_start, journey_end,
+                journey_data_for_next_X_trains, timeoffset, autoadjustscans, stops_of_interest, interval, client):
         """Construct a live train time sensor."""
 
         default_sensor_name = (
-            f"Next train from {station_code} to {calling_at} ({timeoffset})" if (timeoffset.total_seconds() > 0) 
-            else f"Next train from {station_code} to {calling_at}")
+            f"Next train from {journey_start} to {journey_end} ({timeoffset})" if (timeoffset.total_seconds() > 0) 
+            else f"Next train from {journey_start} to {journey_end}")
 
-        self._station_code = station_code
-        self._calling_at = calling_at
+        self._journey_start = journey_start
+        self._journey_end = journey_end
         self._journey_data_for_next_X_trains = journey_data_for_next_X_trains
         self._next_trains = []
         self._data = {}
@@ -138,6 +141,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
         self._password = password
         self._timeoffset = timeoffset
         self._autoadjustscans = autoadjustscans
+        self._stops_of_interest = stops_of_interest
         self._interval = interval
         self._client = client
 
@@ -218,7 +222,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
 
     async def _getdepartures_api_request(self):
         """Perform an API request."""
-        depsUrl = self.TRANSPORT_API_URL_BASE + f"search/{self._station_code}/to/{self._calling_at}"
+        depsUrl = self.TRANSPORT_API_URL_BASE + f"search/{self._journey_start}/to/{self._journey_end}"
         async with self._client.get(depsUrl, auth=aiohttp.BasicAuth(login=self._username, password=self._password, encoding='utf-8')) as response:
             if response.status == 200:
                 self._data = await response.json()
@@ -227,30 +231,45 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             else:
                 _LOGGER.warning("Invalid response from API")
 
-    async def _add_journey_data(self, train, scheduled, estimated):
+    async def _add_journey_data(self, train, scheduled_departure, estimated_departure):
         """Perform an API request."""
-        trainUrl = self.TRANSPORT_API_URL_BASE + f"service/{train['service_uid']}/{scheduled.strftime('%Y/%m/%d')}"
+        trainUrl = self.TRANSPORT_API_URL_BASE + f"service/{train['service_uid']}/{scheduled_departure.strftime('%Y/%m/%d')}"
         async with self._client.get(trainUrl, auth=aiohttp.BasicAuth(login=self._username, password=self._password, encoding='utf-8')) as response:
             if response.status == 200:
                 data = await response.json()
+                stopsOfInterest = []
                 stopCount = -1 # origin counts as first stop in the returned json
                 found = False
                 for stop in data['locations']:
-                    if stop['crs'] == self._calling_at:
-                        scheduled_arrival = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled)
-                        estimated_arrival = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled)
+                    if stop['crs'] == self._journey_end:
+                        scheduled_arrival = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled_departure)
+                        estimated_arrival = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled_departure)
                         newtrain = {
+                            "stops_of_interest": stopsOfInterest,
                             "scheduled_arrival": scheduled_arrival.strftime(STRFFORMAT),
                             "estimate_arrival": estimated_arrival.strftime(STRFFORMAT),
-                            "journey_time_mins": _delta_secs(scheduled_arrival, estimated) // 60,
+                            "journey_time_mins": _delta_secs(estimated_arrival, estimated_departure) // 60,
                             "stops": stopCount
                         }
                         train.update(newtrain)
                         found = True
                         break
+                    elif stop['crs'] in self._stops_of_interest and stop['isPublicCall']:
+                        scheduled_stop = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled_departure)
+                        estimated_stop = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled_departure)
+                        stopsOfInterest.append(
+                            {
+                                "stop": stop['crs'],
+                                "name": stop['description'],
+                                "scheduled_stop": scheduled_stop.strftime(STRFFORMAT),
+                                "estimate_stop": estimated_stop.strftime(STRFFORMAT),
+                                "journey_time_mins": _delta_secs(estimated_stop, estimated_departure) // 60,
+                                "stops": stopCount
+                            }
+                        )
                     stopCount += 1
                 if not found:
-                    _LOGGER.warning(f"Could not find {self._calling_at} in stops for service {train['service_uid']}.")    
+                    _LOGGER.warning(f"Could not find {self._journey_end} in stops for service {train['service_uid']}.")    
             else:
                 _LOGGER.warning(f"Could not populate arrival times: Invalid response from API (HTTP code {response.status})")
 
@@ -259,8 +278,8 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
         """Return other details about the sensor state."""
         attrs = {}
         if self._data is not None:
-            attrs[ATTR_STATION_CODE] = self._station_code
-            attrs[ATTR_CALLING_AT] = self._calling_at
+            attrs[ATTR_JOURNEY_START] = self._journey_start
+            attrs[ATTR_JOURNEY_END] = self._journey_end
             if self._next_trains:
                 attrs[ATTR_NEXT_TRAINS] = self._next_trains
             return attrs
