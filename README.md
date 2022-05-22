@@ -63,6 +63,7 @@ sensor:
     password: '[Your RTT API Auth Credentials password]' # (recommended to use '!secret my_rtt_password' and add to secrets.yaml)
     scan_interval:
       seconds: 90 # this defaults to 60 seconds (in HA) so you can change this.  Dont set it too frequent or you might get blocked for abuse of the RTT API.
+    auto_adjust_scans: true # If no depatures are retrieved, back off polling interval to 30 mins (until there are some trains)
     queries:
       - origin: WAL
         destination: WAT
@@ -73,7 +74,6 @@ sensor:
         # the API to lookup the number of stops, journey time and estimated
         # arrival time to the destination (WAT in this case).
         journey_data_for_next_X_trains: 5 
-        auto_adjust_scans: true # If no depatures are retrieved, back off polling interval to 30 mins (until there are some trains)
         stops_of_interest:
           - VXH # a stop_of_interest will add data about this stop to each train's data (only if journey_data is gathered for that journey).  Means you can add more context to the train journey (e.g. my commute can start at two stops for some trains, only one for others meaning it might change my choice of train if I can get on at VXH instead of WAT)
       - origin: WAT
