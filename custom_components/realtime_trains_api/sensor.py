@@ -51,7 +51,7 @@ _QUERY_SCHEME = vol.Schema(
         vol.Required(CONF_START): cv.string,
         vol.Required(CONF_END): cv.string,
         vol.Optional(CONF_JOURNEYDATA, default=0): cv.positive_int,
-        vol.Optional(CONF_TIMEOFFSET, default=DEFAULT_TIMEOFFSET):
+        vol.Optional(CONF_TIMEOFFSET, default=DEFAULT_TIMEOFFSET): 
             vol.All(cv.time_period, cv.positive_timedelta),
         vol.Optional(CONF_STOPS_OF_INTEREST): [cv.string],
     }
