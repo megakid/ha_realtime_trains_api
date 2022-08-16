@@ -244,12 +244,20 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                     if stop['crs'] == self._journey_end and stop['displayAs'] != 'ORIGIN':
                         scheduled_arrival = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled_departure)
                         estimated_arrival = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled_departure)
+
+                        status = "OK"
+                        if 'CANCELLED' in stop['displayAs']:
+                            status = "Cancelled"
+                        elif estimated_arrival > scheduled_arrival:
+                            status = "Delayed"
+
                         newtrain = {
                             "stops_of_interest": stopsOfInterest,
                             "scheduled_arrival": scheduled_arrival.strftime(STRFFORMAT),
                             "estimate_arrival": estimated_arrival.strftime(STRFFORMAT),
                             "journey_time_mins": _delta_secs(estimated_arrival, estimated_departure) // 60,
-                            "stops": stopCount
+                            "stops": stopCount,
+                            "status": status
                         }
                         train.update(newtrain)
                         found = True
