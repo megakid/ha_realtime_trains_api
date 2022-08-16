@@ -242,28 +242,42 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                 found = False
                 for stop in data['locations']:
                     if stop['crs'] == self._journey_end:
-                        scheduled_arrival = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled_departure)
-                        estimated_arrival = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled_departure)
+                        try:
+                            scheduled_arrival = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled_departure).strftime(STRFFORMAT)
+                            estimated_arrival = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled_departure).strftime(STRFFORMAT)
+                            journey_time_mins = _delta_secs(estimated_arrival, estimated_departure) // 60
+                        except:  
+                            scheduled_arrival = "CANCELLED"
+                            estimated_arrival = "CANCELLED"
+                            journey_time_mins = "CANCELLED"
+
                         newtrain = {
                             "stops_of_interest": stopsOfInterest,
-                            "scheduled_arrival": scheduled_arrival.strftime(STRFFORMAT),
-                            "estimate_arrival": estimated_arrival.strftime(STRFFORMAT),
-                            "journey_time_mins": _delta_secs(estimated_arrival, estimated_departure) // 60,
+                            "scheduled_arrival": scheduled_arrival,
+                            "estimate_arrival": estimated_arrival,
+                            "journey_time_mins": journey_time_mins,
                             "stops": stopCount
                         }
                         train.update(newtrain)
                         found = True
                         break
                     elif stop['crs'] in self._stops_of_interest and stop['isPublicCall']:
-                        scheduled_stop = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled_departure)
-                        estimated_stop = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled_departure)
+                        try:
+                            scheduled_stop = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled_departure).strftime(STRFFORMAT)
+                            estimated_stop = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled_departure).strftime(STRFFORMAT)
+                            journey_time_mins = _delta_secs(estimated_stop, estimated_departure) // 60
+                       except:  
+                            scheduled_stop = "CANCELLED"
+                            estimated_stop = "CANCELLED"
+                            journey_time_mins = "CANCELLED"
+                            
                         stopsOfInterest.append(
                             {
                                 "stop": stop['crs'],
                                 "name": stop['description'],
-                                "scheduled_stop": scheduled_stop.strftime(STRFFORMAT),
-                                "estimate_stop": estimated_stop.strftime(STRFFORMAT),
-                                "journey_time_mins": _delta_secs(estimated_stop, estimated_departure) // 60,
+                                "scheduled_stop": scheduled_stop,
+                                "estimate_stop": estimated_stop,
+                                "journey_time_mins": journey_time_mins,
                                 "stops": stopCount
                             }
                         )
@@ -298,4 +312,3 @@ def _timestamp(hhmm_time_str : str, date : datetime=None) -> datetime:
 def _delta_secs(hhmm_datetime_a : datetime, hhmm_datetime_b : datetime) -> float:
     """Calculate time delta in minutes to a time in hh:mm format."""
     return (hhmm_datetime_a - hhmm_datetime_b).total_seconds()
-
