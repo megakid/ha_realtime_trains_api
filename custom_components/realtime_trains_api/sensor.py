@@ -234,7 +234,6 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
     async def _add_journey_data(self, train, scheduled_departure, estimated_departure):
         """Perform an API request."""
         trainUrl = self.TRANSPORT_API_URL_BASE + f"service/{train['service_uid']}/{scheduled_departure.strftime('%Y/%m/%d')}"
-        _LOGGER.warning(f"Adding journey data by calling: {trainUrl} for train {str(train)}")
         async with self._client.get(trainUrl, auth=aiohttp.BasicAuth(login=self._username, password=self._password, encoding='utf-8')) as response:
             if response.status == 200:
                 data = await response.json()
