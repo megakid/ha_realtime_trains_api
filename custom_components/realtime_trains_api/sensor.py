@@ -51,7 +51,7 @@ _QUERY_SCHEME = vol.Schema(
         vol.Required(CONF_START): cv.string,
         vol.Required(CONF_END): cv.string,
         vol.Optional(CONF_JOURNEYDATA, default=0): cv.positive_int,
-        vol.Optional(CONF_TIMEOFFSET, default=DEFAULT_TIMEOFFSET): 
+        vol.Optional(CONF_TIMEOFFSET, default=DEFAULT_TIMEOFFSET):
             vol.All(cv.time_period, cv.positive_timedelta),
         vol.Optional(CONF_STOPS_OF_INTEREST): [cv.string],
     }
@@ -80,7 +80,7 @@ async def async_setup_platform(
     username = config[CONF_API_USERNAME]
     password = config[CONF_API_PASSWORD]
     queries = config[CONF_QUERIES]
-    
+
 
     client = async_get_clientsession(hass)
 
@@ -129,7 +129,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
         """Construct a live train time sensor."""
 
         default_sensor_name = (
-            f"Next train from {journey_start} to {journey_end} ({timeoffset})" if (timeoffset.total_seconds() > 0) 
+            f"Next train from {journey_start} to {journey_end} ({timeoffset})" if (timeoffset.total_seconds() > 0)
             else f"Next train from {journey_start} to {journey_end}")
 
         self._journey_start = journey_start
@@ -164,25 +164,25 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
         for departure in departures:
             if not departure["isPassenger"] :
                 continue
-            
+
             departuredate = TIMEZONE.localize(datetime.fromisoformat(departure["runDate"]))
-            
+
             scheduled = _to_colonseparatedtime(departure["locationDetail"]["gbttBookedDeparture"])
             scheduledTs = _timestamp(scheduled, departuredate)
-            
+
             if _delta_secs(scheduledTs, now) < self._timeoffset.total_seconds():
                 continue
-            
+
             estimated = _to_colonseparatedtime(departure["locationDetail"]["realtimeDeparture"])
             estimatedTs = _timestamp(estimated, departuredate)
-            
+
             if nextDepartureEstimatedTs is None:
                 nextDepartureEstimatedTs = estimatedTs
             else:
                 nextDepartureEstimatedTs = min(nextDepartureEstimatedTs, estimatedTs)
 
             departureCount += 1
-            
+
             train = {
                     "origin_name": departure["locationDetail"]["origin"][0]["description"],
                     "destination_name": departure["locationDetail"]["destination"][0]["description"],
@@ -202,7 +202,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             self._state = "No Departures"
         else:
             self._state = _delta_secs(nextDepartureEstimatedTs, now) // 60
-        
+
         if self._autoadjustscans:
             if nextDepartureEstimatedTs is None:
                 self.async_update = Throttle(timedelta(minutes=30))(self._async_update)
@@ -241,7 +241,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                 stopCount = -1 # origin counts as first stop in the returned json
                 found = False
                 for stop in data['locations']:
-                    if stop['crs'] == self._journey_end:
+                    if stop['crs'] == self._journey_end and stop['displayAs'] != 'ORIGIN':
                         scheduled_arrival = _timestamp(_to_colonseparatedtime(stop['gbttBookedArrival']), scheduled_departure)
                         estimated_arrival = _timestamp(_to_colonseparatedtime(stop['realtimeArrival']), scheduled_departure)
                         newtrain = {
@@ -269,7 +269,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                         )
                     stopCount += 1
                 if not found:
-                    _LOGGER.warning(f"Could not find {self._journey_end} in stops for service {train['service_uid']}.")    
+                    _LOGGER.warning(f"Could not find {self._journey_end} in stops for service {train['service_uid']}.")
             else:
                 _LOGGER.warning(f"Could not populate arrival times: Invalid response from API (HTTP code {response.status})")
 
@@ -298,4 +298,3 @@ def _timestamp(hhmm_time_str : str, date : datetime=None) -> datetime:
 def _delta_secs(hhmm_datetime_a : datetime, hhmm_datetime_b : datetime) -> float:
     """Calculate time delta in minutes to a time in hh:mm format."""
     return (hhmm_datetime_a - hhmm_datetime_b).total_seconds()
-
