@@ -194,8 +194,10 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                     "platform": departure["locationDetail"].get("platform", None),
                     "operator_name": departure["atocName"],
                 }
-            if departureCount <= self._journey_data_for_next_X_trains:
-                await self._add_journey_data(train, scheduledTs, estimatedTs)
+            if departureCount > self._journey_data_for_next_X_trains:
+                break;
+            
+            await self._add_journey_data(train, scheduledTs, estimatedTs)
             self._next_trains.append(train)
 
         if nextDepartureEstimatedTs is None:
