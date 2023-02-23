@@ -55,7 +55,7 @@ Alternatively, you can use the built-in `uk_transport` integration (see https://
 1. Signup to https://api.rtt.io
 2. Add repository to HACS (see https://hacs.xyz/docs/faq/custom_repositories) - use "https://github.com/megakid/ha_realtime_trains_api" as the repository URL.
 3. Install the `realtime_trains_api` integration inside HACS
-5. To your HA `configuration.yaml`, add the following:
+4. To your HA `configuration.yaml`, add the following:
 ```yaml
 sensor:
   - platform: realtime_trains_api
@@ -82,5 +82,5 @@ sensor:
         time_offset:
           minutes: 20 # This will display departures from now+20 minutes - useful if the station is 20 minutes travel/walk away.
 ```
-6. Restart HA
-7. Your `sensor` will be named something like `sensor.next_train_from_wal_to_wat` (unless you specified a `sensor_name`) for each query you defined in your configuration.
+5. Restart HA
+6. Your `sensor` will be named something like `sensor.next_train_from_wal_to_wat` (unless you specified a `sensor_name`) for each query you defined in your configuration.
