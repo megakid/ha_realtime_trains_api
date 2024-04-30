@@ -10,7 +10,11 @@ import voluptuous as vol
 from typing import cast
 
 from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
-from homeassistant.const import TIME_MINUTES, CONF_SCAN_INTERVAL
+from homeassistant.const import (
+    UnitOfTime,
+    STATE_UNKNOWN,
+    CONF_SCAN_INTERVAL,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
@@ -122,7 +126,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
 
     TRANSPORT_API_URL_BASE = "https://api.rtt.io/api/v1/json/"
     _attr_icon = "mdi:train"
-    _attr_native_unit_of_measurement = TIME_MINUTES
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
 
     def __init__(self, sensor_name, username, password, journey_start, journey_end,
                 journey_data_for_next_X_trains, timeoffset, autoadjustscans, stops_of_interest, interval, client):
@@ -201,7 +205,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             self._next_trains.append(train)
 
         if nextDepartureEstimatedTs is None:
-            self._state = "No Departures"
+            self._state = None
         else:
             self._state = _delta_secs(nextDepartureEstimatedTs, now) // 60
 
