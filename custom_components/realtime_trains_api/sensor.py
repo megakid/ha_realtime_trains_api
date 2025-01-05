@@ -33,6 +33,7 @@ ATTR_REQUEST_TIME = "request_time"
 ATTR_JOURNEY_START = "journey_start"
 ATTR_JOURNEY_END = "journey_end"
 ATTR_NEXT_TRAINS = "next_trains"
+ATTR_AGGREGATE = "aggregate_data"
 
 CONF_API_USERNAME = "username"
 CONF_API_PASSWORD = "password"
@@ -140,6 +141,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
         self._journey_end = journey_end
         self._journey_data_for_next_X_trains = journey_data_for_next_X_trains
         self._next_trains = []
+        self._aggregate_data = {}
         self._data = {}
         self._username = username
         self._password = password
@@ -194,6 +196,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                     "service_uid": departure["serviceUid"],
                     "scheduled": scheduledTs.strftime(STRFFORMAT),
                     "estimated": estimatedTs.strftime(STRFFORMAT),
+                    "delay": _delta_secs(estimatedTs, scheduledTs) // 60,
                     "minutes": _delta_secs(estimatedTs, now) // 60,
                     "platform": departure["locationDetail"].get("platform", None),
                     "operator_name": departure["atocName"],
@@ -203,6 +206,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             
             await self._add_journey_data(train, scheduledTs, estimatedTs)
             self._next_trains.append(train)
+        self._aggregate_data = await self._calculate_aggregates()
 
         if nextDepartureEstimatedTs is None:
             self._state = None
@@ -261,6 +265,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                             "stops_of_interest": stopsOfInterest,
                             "scheduled_arrival": scheduled_arrival.strftime(STRFFORMAT),
                             "estimate_arrival": estimated_arrival.strftime(STRFFORMAT),
+                            "arrival_delay":  _delta_secs(estimated_arrival, scheduled_arrival) // 60,
                             "journey_time_mins": _delta_secs(estimated_arrival, estimated_departure) // 60,
                             "stops": stopCount,
                             "status": status
@@ -277,6 +282,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                                 "name": stop['description'],
                                 "scheduled_stop": scheduled_stop.strftime(STRFFORMAT),
                                 "estimate_stop": estimated_stop.strftime(STRFFORMAT),
+                                "stop_delay":  _delta_secs(estimated_stop, scheduled_stop) // 60,
                                 "journey_time_mins": _delta_secs(estimated_stop, estimated_departure) // 60,
                                 "stops": stopCount
                             }
@@ -287,6 +293,54 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             else:
                 _LOGGER.warning(f"Could not populate arrival times: Invalid response from API (HTTP code {response.status})")
 
+    async def _calculate_aggregates(self):
+        """Calculate aggregate delay and duration data."""
+        departure_delays = []
+        arrival_delays = []
+        stop_delays = []
+        durations = []
+        agg_delays = {}
+        for train in self._next_trains:
+            if 'journey_time_mins' in train:
+                durations.append(train['journey_time_mins'])
+            if 'delay' in train and train['delay'] > 0:
+                departure_delays.append(train['delay'])
+            if 'arrival_delay' in train and train['arrival_delay'] > 0:
+                arrival_delays.append(train['arrival_delay'])
+            if 'stop_delay' in train and train['stop_delay'] > 0:
+                stop_delays.append(train['stop_delay'])
+
+        if len(arrival_delays):
+            agg_delays['arrival'] = {
+                'count': len(arrival_delays),
+                'min': min(arrival_delays),
+                'max': max(arrival_delays),
+                'average': round( sum(arrival_delays) / len(arrival_delays) )
+            }
+        if len(departure_delays):
+            agg_delays['departure'] = {
+                'count': len(departure_delays),
+                'min': min(departure_delays),
+                'max': max(departure_delays),
+                'average': round( sum(departure_delays) / len(departure_delays) )
+            }
+        if len(stop_delays):
+            agg_delays['stop'] = {
+                'count': len(stop_delays),
+                'min': min(stop_delays),
+                'max': max(stop_delays),
+                'average': round( sum(stop_delays) / len(stop_delays) )
+            }
+        return {
+            'delays': agg_delays,
+            'durations': {
+                'count': len(durations),
+                'min': min(durations),
+                'max': max(durations),
+                'average': round( sum(durations) / len(durations) )
+            }
+        }
+
     @property
     def extra_state_attributes(self):
         """Return other details about the sensor state."""
@@ -296,6 +350,7 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
             attrs[ATTR_JOURNEY_END] = self._journey_end
             if self._next_trains:
                 attrs[ATTR_NEXT_TRAINS] = self._next_trains
+                attrs[ATTR_AGGREGATE] = self._aggregate_data
             return attrs
 
 def _to_colonseparatedtime(hhmm_time_str : str) -> str:
