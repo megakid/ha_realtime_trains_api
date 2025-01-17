@@ -52,7 +52,7 @@ Alternatively, you can use the built-in `uk_transport` integration (see https://
 
 ## Installation & Usage
 
-1. Signup to https://api.rtt.io
+1. Signup to https://api.rtt.io/ and retrieve your API Auth Credentials.
 2. Add repository to HACS (see https://hacs.xyz/docs/faq/custom_repositories) - use "https://github.com/megakid/ha_realtime_trains_api" as the repository URL.
 3. Install the `realtime_trains_api` integration inside HACS
 4. To your HA `configuration.yaml`, add the following:
