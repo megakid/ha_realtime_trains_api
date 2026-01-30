@@ -331,14 +331,18 @@ class RealtimeTrainLiveTrainTimeSensor(SensorEntity):
                 'max': max(stop_delays),
                 'average': round( sum(stop_delays) / len(stop_delays) )
             }
-        return {
-            'delays': agg_delays,
-            'durations': {
+        durations_data = None
+        if durations:
+            durations_data = {
                 'count': len(durations),
                 'min': min(durations),
                 'max': max(durations),
-                'average': round( sum(durations) / len(durations) )
+                'average': round(sum(durations) / len(durations)),
             }
+
+        return {
+            'delays': agg_delays,
+            'durations': durations_data,
         }
 
     @property
